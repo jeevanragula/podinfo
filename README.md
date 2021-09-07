@@ -1,5 +1,7 @@
 # podinfo
 
+[![IaC](https://app.soluble.cloud/api/v1/public/badges/4df72d88-6deb-4114-bd7d-af2b4924b6c5.svg)](https://app.soluble.cloud/repos/details/github.com/jeevanragula/podinfo)  [![CIS](https://app.soluble.cloud/api/v1/public/badges/787a6084-47c3-4931-9e3d-cae285a6d245.svg)](https://app.soluble.cloud/repos/details/github.com/jeevanragula/podinfo)  
+
 [![e2e](https://github.com/stefanprodan/podinfo/workflows/e2e/badge.svg)](https://github.com/stefanprodan/podinfo/blob/master/.github/workflows/e2e.yml)
 [![test](https://github.com/stefanprodan/podinfo/workflows/test/badge.svg)](https://github.com/stefanprodan/podinfo/blob/master/.github/workflows/test.yml)
 [![cve-scan](https://github.com/stefanprodan/podinfo/workflows/cve-scan/badge.svg)](https://github.com/stefanprodan/podinfo/blob/master/.github/workflows/cve-scan.yml)
