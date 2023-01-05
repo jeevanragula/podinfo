@@ -23,6 +23,12 @@ build:
 	GIT_COMMIT=$$(git rev-list -1 HEAD) && CGO_ENABLED=0 go build  -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=$(GIT_COMMIT)" -a -o ./bin/podinfo ./cmd/podinfo/*
 	GIT_COMMIT=$$(git rev-list -1 HEAD) && CGO_ENABLED=0 go build  -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=$(GIT_COMMIT)" -a -o ./bin/podcli ./cmd/podcli/*
 
+tidy:
+	rm -f go.sum; go mod tidy -compat=1.19
+
+vet:
+	go vet ./...
+
 fmt:
 	gofmt -l -s -w ./
 	goimports -l -w ./
@@ -33,6 +39,13 @@ build-charts:
 
 build-container:
 	docker build -t $(DOCKER_IMAGE_NAME):$(VERSION) .
+
+build-xx:
+	docker buildx build \
+	--platform=linux/amd64 \
+	-t $(DOCKER_IMAGE_NAME):$(VERSION) \
+	--load \
+	-f Dockerfile.xx .
 
 build-base:
 	docker build -f Dockerfile.base -t $(DOCKER_REPOSITORY)/podinfo-base:latest .
@@ -59,16 +72,17 @@ push-container:
 version-set:
 	@next="$(TAG)" && \
 	current="$(VERSION)" && \
-	sed -i '' "s/$$current/$$next/g" pkg/version/version.go && \
-	sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values.yaml && \
-	sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values-prod.yaml && \
-	sed -i '' "s/appVersion: $$current/appVersion: $$next/g" charts/podinfo/Chart.yaml && \
-	sed -i '' "s/version: $$current/version: $$next/g" charts/podinfo/Chart.yaml && \
-	sed -i '' "s/podinfo:$$current/podinfo:$$next/g" kustomize/deployment.yaml && \
-	sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/frontend/deployment.yaml && \
-	sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/backend/deployment.yaml && \
-	sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/frontend/deployment.yaml && \
-	sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/backend/deployment.yaml && \
+	/usr/bin/sed -i '' "s/$$current/$$next/g" pkg/version/version.go && \
+	/usr/bin/sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values.yaml && \
+	/usr/bin/sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values-prod.yaml && \
+	/usr/bin/sed -i '' "s/appVersion: $$current/appVersion: $$next/g" charts/podinfo/Chart.yaml && \
+	/usr/bin/sed -i '' "s/version: $$current/version: $$next/g" charts/podinfo/Chart.yaml && \
+	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" kustomize/deployment.yaml && \
+	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/frontend/deployment.yaml && \
+	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/backend/deployment.yaml && \
+	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/frontend/deployment.yaml && \
+	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/backend/deployment.yaml && \
+	/usr/bin/sed -i '' "s/$$current/$$next/g" cue/main.cue && \
 	echo "Version $$next set in code, deployment, chart and kustomize"
 
 release:
@@ -76,5 +90,16 @@ release:
 	git push origin $(VERSION)
 
 swagger:
-	go get github.com/swaggo/swag/cmd/swag
+	go install github.com/swaggo/swag/cmd/swag@latest
+	go get github.com/swaggo/swag/gen@latest
+	go get github.com/swaggo/swag/cmd/swag@latest
 	cd pkg/api && $$(go env GOPATH)/bin/swag init -g server.go
+
+.PHONY: cue-mod
+cue-mod:
+	@cd cue && cue get go k8s.io/api/...
+
+.PHONY: cue-gen
+cue-gen:
+	@cd cue && cue fmt ./... && cue vet --all-errors --concrete ./...
+	@cd cue && cue gen

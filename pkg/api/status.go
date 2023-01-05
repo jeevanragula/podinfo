@@ -14,14 +14,18 @@ import (
 // @Tags HTTP API
 // @Accept json
 // @Produce json
+// @Param code path int true "status code to return"
 // @Router /status/{code} [get]
 // @Success 200 {object} api.MapResponse
 func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
+	_, span := s.tracer.Start(r.Context(), "statusHandler")
+	defer span.End()
+
 	vars := mux.Vars(r)
 
 	code, err := strconv.Atoi(vars["code"])
 	if err != nil {
-		s.ErrorResponse(w, r, err.Error(), http.StatusBadRequest)
+		s.ErrorResponse(w, r, span, err.Error(), http.StatusBadRequest)
 		return
 	}
 

@@ -8,7 +8,7 @@ backends: []
 
 image:
   repository: ghcr.io/stefanprodan/podinfo
-  tag: 6.0.0
+  tag: 6.3.0
   pullPolicy: IfNotPresent
 
 ui:
@@ -81,13 +81,13 @@ hpa:
   # average http requests per second per pod (k8s-prometheus-adapter)
   requests:
 
-# Redis address in the format <host>:<port>
+# Redis address in the format tcp://<host>:<port>
 cache: ""
 # Redis deployment
 redis:
   enabled: false
   repository: redis
-  tag: 6.0.8
+  tag: 7.0.7
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -95,6 +95,8 @@ serviceAccount:
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
   name:
+  # List of image pull secrets if pulling from private registries
+  imagePullSecrets: []
 
 # set container security context
 securityContext: {}
@@ -138,3 +140,18 @@ tolerations: []
 affinity: {}
 
 podAnnotations: {}
+
+# https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+probes:
+  readiness:
+    initialDelaySeconds: 1
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+    periodSeconds: 10
+  liveness:
+    initialDelaySeconds: 1
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+    periodSeconds: 10

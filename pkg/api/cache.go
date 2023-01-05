@@ -1,8 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -18,18 +20,22 @@ import (
 // @Tags HTTP API
 // @Accept json
 // @Produce json
+// @Param key path string true "Key to save to"
 // @Router /cache/{key} [post]
 // @Success 202
 func (s *Server) cacheWriteHandler(w http.ResponseWriter, r *http.Request) {
+	_, span := s.tracer.Start(r.Context(), "cacheWriteHandler")
+	defer span.End()
+
 	if s.pool == nil {
-		s.ErrorResponse(w, r, "cache server is offline", http.StatusBadRequest)
+		s.ErrorResponse(w, r, span, "cache server is offline", http.StatusBadRequest)
 		return
 	}
 
 	key := mux.Vars(r)["key"]
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		s.ErrorResponse(w, r, "reading the request body failed", http.StatusBadRequest)
+		s.ErrorResponse(w, r, span, "reading the request body failed", http.StatusBadRequest)
 		return
 	}
 
@@ -38,7 +44,7 @@ func (s *Server) cacheWriteHandler(w http.ResponseWriter, r *http.Request) {
 	_, err = conn.Do("SET", key, string(body))
 	if err != nil {
 		s.logger.Warn("cache set failed", zap.Error(err))
-		s.ErrorResponse(w, r, "cache set failed", http.StatusInternalServerError)
+		s.ErrorResponse(w, r, span, "cache set failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -51,11 +57,15 @@ func (s *Server) cacheWriteHandler(w http.ResponseWriter, r *http.Request) {
 // @Tags HTTP API
 // @Accept json
 // @Produce json
+// @Param key path string true "Key to delete"
 // @Router /cache/{key} [delete]
 // @Success 202
 func (s *Server) cacheDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	_, span := s.tracer.Start(r.Context(), "cacheDeleteHandler")
+	defer span.End()
+
 	if s.pool == nil {
-		s.ErrorResponse(w, r, "cache server is offline", http.StatusBadRequest)
+		s.ErrorResponse(w, r, span, "cache server is offline", http.StatusBadRequest)
 		return
 	}
 
@@ -79,11 +89,15 @@ func (s *Server) cacheDeleteHandler(w http.ResponseWriter, r *http.Request) {
 // @Tags HTTP API
 // @Accept json
 // @Produce json
+// @Param key path string true "Key to load from cache"
 // @Router /cache/{key} [get]
 // @Success 200 {string} string value
 func (s *Server) cacheReadHandler(w http.ResponseWriter, r *http.Request) {
+	_, span := s.tracer.Start(r.Context(), "cacheReadHandler")
+	defer span.End()
+
 	if s.pool == nil {
-		s.ErrorResponse(w, r, "cache server is offline", http.StatusBadRequest)
+		s.ErrorResponse(w, r, span, "cache server is offline", http.StatusBadRequest)
 		return
 	}
 
@@ -110,16 +124,31 @@ func (s *Server) cacheReadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(data))
 }
 
-func (s *Server) startCachePool(ticker *time.Ticker, stopCh <-chan struct{}) {
+func (s *Server) getCacheConn() (redis.Conn, error) {
+	redisUrl, err := url.Parse(s.config.CacheServer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse redis url: %v", err)
+	}
+
+	var opts []redis.DialOption
+	if user := redisUrl.User; user != nil {
+		opts = append(opts, redis.DialUsername(user.Username()))
+		if password, ok := user.Password(); ok {
+			opts = append(opts, redis.DialPassword(password))
+		}
+	}
+
+	return redis.Dial("tcp", redisUrl.Host, opts...)
+}
+
+func (s *Server) startCachePool(ticker *time.Ticker) {
 	if s.config.CacheServer == "" {
 		return
 	}
 	s.pool = &redis.Pool{
 		MaxIdle:     3,
 		IdleTimeout: 240 * time.Second,
-		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", s.config.CacheServer)
-		},
+		Dial:        s.getCacheConn,
 		TestOnBorrow: func(c redis.Conn, t time.Time) error {
 			_, err := c.Do("PING")
 			return err
@@ -140,8 +169,6 @@ func (s *Server) startCachePool(ticker *time.Ticker, stopCh <-chan struct{}) {
 		setVersion()
 		for {
 			select {
-			case <-stopCh:
-				return
 			case <-ticker.C:
 				setVersion()
 			}

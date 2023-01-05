@@ -14,11 +14,12 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/spf13/viper"
 	_ "github.com/stefanprodan/podinfo/pkg/api/docs"
 	"github.com/stefanprodan/podinfo/pkg/fscache"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"github.com/swaggo/swag"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -45,40 +46,42 @@ var (
 )
 
 type Config struct {
-	HttpClientTimeout         time.Duration `mapstructure:"http-client-timeout"`
-	HttpServerTimeout         time.Duration `mapstructure:"http-server-timeout"`
-	HttpServerShutdownTimeout time.Duration `mapstructure:"http-server-shutdown-timeout"`
-	BackendURL                []string      `mapstructure:"backend-url"`
-	UILogo                    string        `mapstructure:"ui-logo"`
-	UIMessage                 string        `mapstructure:"ui-message"`
-	UIColor                   string        `mapstructure:"ui-color"`
-	UIPath                    string        `mapstructure:"ui-path"`
-	DataPath                  string        `mapstructure:"data-path"`
-	ConfigPath                string        `mapstructure:"config-path"`
-	CertPath                  string        `mapstructure:"cert-path"`
-	Host                      string        `mapstructure:"host"`
-	Port                      string        `mapstructure:"port"`
-	SecurePort                string        `mapstructure:"secure-port"`
-	PortMetrics               int           `mapstructure:"port-metrics"`
-	Hostname                  string        `mapstructure:"hostname"`
-	H2C                       bool          `mapstructure:"h2c"`
-	RandomDelay               bool          `mapstructure:"random-delay"`
-	RandomDelayUnit           string        `mapstructure:"random-delay-unit"`
-	RandomDelayMin            int           `mapstructure:"random-delay-min"`
-	RandomDelayMax            int           `mapstructure:"random-delay-max"`
-	RandomError               bool          `mapstructure:"random-error"`
-	Unhealthy                 bool          `mapstructure:"unhealthy"`
-	Unready                   bool          `mapstructure:"unready"`
-	JWTSecret                 string        `mapstructure:"jwt-secret"`
-	CacheServer               string        `mapstructure:"cache-server"`
+	HttpClientTimeout     time.Duration `mapstructure:"http-client-timeout"`
+	HttpServerTimeout     time.Duration `mapstructure:"http-server-timeout"`
+	ServerShutdownTimeout time.Duration `mapstructure:"server-shutdown-timeout"`
+	BackendURL            []string      `mapstructure:"backend-url"`
+	UILogo                string        `mapstructure:"ui-logo"`
+	UIMessage             string        `mapstructure:"ui-message"`
+	UIColor               string        `mapstructure:"ui-color"`
+	UIPath                string        `mapstructure:"ui-path"`
+	DataPath              string        `mapstructure:"data-path"`
+	ConfigPath            string        `mapstructure:"config-path"`
+	CertPath              string        `mapstructure:"cert-path"`
+	Host                  string        `mapstructure:"host"`
+	Port                  string        `mapstructure:"port"`
+	SecurePort            string        `mapstructure:"secure-port"`
+	PortMetrics           int           `mapstructure:"port-metrics"`
+	Hostname              string        `mapstructure:"hostname"`
+	H2C                   bool          `mapstructure:"h2c"`
+	RandomDelay           bool          `mapstructure:"random-delay"`
+	RandomDelayUnit       string        `mapstructure:"random-delay-unit"`
+	RandomDelayMin        int           `mapstructure:"random-delay-min"`
+	RandomDelayMax        int           `mapstructure:"random-delay-max"`
+	RandomError           bool          `mapstructure:"random-error"`
+	Unhealthy             bool          `mapstructure:"unhealthy"`
+	Unready               bool          `mapstructure:"unready"`
+	JWTSecret             string        `mapstructure:"jwt-secret"`
+	CacheServer           string        `mapstructure:"cache-server"`
 }
 
 type Server struct {
-	router  *mux.Router
-	logger  *zap.Logger
-	config  *Config
-	pool    *redis.Pool
-	handler http.Handler
+	router         *mux.Router
+	logger         *zap.Logger
+	config         *Config
+	pool           *redis.Pool
+	handler        http.Handler
+	tracer         trace.Tracer
+	tracerProvider *sdktrace.TracerProvider
 }
 
 func NewServer(config *Config, logger *zap.Logger) (*Server, error) {
@@ -123,9 +126,6 @@ func (s *Server) registerHandlers() {
 	s.router.PathPrefix("/swagger/").Handler(httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"),
 	))
-	s.router.PathPrefix("/swagger/").Handler(httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"),
-	))
 	s.router.HandleFunc("/swagger.json", func(w http.ResponseWriter, r *http.Request) {
 		doc, err := swag.ReadDoc()
 		if err != nil {
@@ -138,6 +138,8 @@ func (s *Server) registerHandlers() {
 func (s *Server) registerMiddlewares() {
 	prom := NewPrometheusMiddleware()
 	s.router.Use(prom.Handler)
+	otel := NewOpenTelemetryMiddleware()
+	s.router.Use(otel)
 	httpLogger := NewLoggingMiddleware(s.logger)
 	s.router.Use(httpLogger.Handler)
 	s.router.Use(versionMiddleware)
@@ -150,9 +152,12 @@ func (s *Server) registerMiddlewares() {
 	}
 }
 
-func (s *Server) ListenAndServe(stopCh <-chan struct{}) {
+func (s *Server) ListenAndServe() (*http.Server, *http.Server, *int32, *int32) {
+	ctx := context.Background()
+
 	go s.startMetricsServer()
 
+	s.initTracer(ctx)
 	s.registerHandlers()
 	s.registerMiddlewares()
 
@@ -177,7 +182,7 @@ func (s *Server) ListenAndServe(stopCh <-chan struct{}) {
 
 	// start redis connection pool
 	ticker := time.NewTicker(30 * time.Second)
-	s.startCachePool(ticker, stopCh)
+	s.startCachePool(ticker)
 
 	// create the http server
 	srv := s.startServer()
@@ -193,41 +198,7 @@ func (s *Server) ListenAndServe(stopCh <-chan struct{}) {
 		atomic.StoreInt32(&ready, 1)
 	}
 
-	// wait for SIGTERM or SIGINT
-	<-stopCh
-	ctx, cancel := context.WithTimeout(context.Background(), s.config.HttpServerShutdownTimeout)
-	defer cancel()
-
-	// all calls to /healthz and /readyz will fail from now on
-	atomic.StoreInt32(&healthy, 0)
-	atomic.StoreInt32(&ready, 0)
-
-	// close cache pool
-	if s.pool != nil {
-		_ = s.pool.Close()
-	}
-
-	s.logger.Info("Shutting down HTTP/HTTPS server", zap.Duration("timeout", s.config.HttpServerShutdownTimeout))
-
-	// wait for Kubernetes readiness probe to remove this instance from the load balancer
-	// the readiness check interval must be lower than the timeout
-	if viper.GetString("level") != "debug" {
-		time.Sleep(3 * time.Second)
-	}
-
-	// determine if the http server was started
-	if srv != nil {
-		if err := srv.Shutdown(ctx); err != nil {
-			s.logger.Warn("HTTP server graceful shutdown failed", zap.Error(err))
-		}
-	}
-
-	// determine if the secure server was started
-	if secureSrv != nil {
-		if err := secureSrv.Shutdown(ctx); err != nil {
-			s.logger.Warn("HTTPS server graceful shutdown failed", zap.Error(err))
-		}
-	}
+	return srv, secureSrv, &healthy, &ready
 }
 
 func (s *Server) startServer() *http.Server {

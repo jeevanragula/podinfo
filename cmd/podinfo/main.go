@@ -18,6 +18,7 @@ import (
 	"github.com/stefanprodan/podinfo/pkg/grpc"
 	"github.com/stefanprodan/podinfo/pkg/signals"
 	"github.com/stefanprodan/podinfo/pkg/version"
+	go_grpc "google.golang.org/grpc"
 )
 
 func main() {
@@ -29,11 +30,11 @@ func main() {
 	fs.Int("port-metrics", 0, "metrics port")
 	fs.Int("grpc-port", 0, "gRPC port")
 	fs.String("grpc-service-name", "podinfo", "gPRC service name")
-	fs.String("level", "info", "log level debug, info, warn, error, flat or panic")
+	fs.String("level", "info", "log level debug, info, warn, error, fatal or panic")
 	fs.StringSlice("backend-url", []string{}, "backend service URL")
 	fs.Duration("http-client-timeout", 2*time.Minute, "client timeout duration")
 	fs.Duration("http-server-timeout", 30*time.Second, "server read and write timeout duration")
-	fs.Duration("http-server-shutdown-timeout", 5*time.Second, "server graceful shutdown timeout duration")
+	fs.Duration("server-shutdown-timeout", 5*time.Second, "server graceful shutdown timeout duration")
 	fs.String("data-path", "/data", "data local path")
 	fs.String("config-path", "", "config dir path")
 	fs.String("cert-path", "/data/cert", "certificate path for HTTPS port")
@@ -52,7 +53,8 @@ func main() {
 	fs.Bool("unready", false, "when set, ready state is never reached")
 	fs.Int("stress-cpu", 0, "number of CPU cores with 100 load")
 	fs.Int("stress-memory", 0, "MB of data to load into memory")
-	fs.String("cache-server", "", "Redis address in the format <host>:<port>")
+	fs.String("cache-server", "", "Redis address in the format 'tcp://<host>:<port>'")
+	fs.String("otel-service-name", "", "service name for reporting to open telemetry address, when not set tracing is disabled")
 
 	versionFlag := fs.BoolP("version", "v", false, "get version number")
 
@@ -90,8 +92,6 @@ func main() {
 		if readErr := viper.ReadInConfig(); readErr != nil {
 			fmt.Printf("Error reading config file, %v\n", readErr)
 		}
-	} else {
-		fmt.Printf("Error to open config file, %v\n", fileErr)
 	}
 
 	// configure logging
@@ -136,9 +136,10 @@ func main() {
 	}
 
 	// start gRPC server
+	var grpcServer *go_grpc.Server
 	if grpcCfg.Port > 0 {
 		grpcSrv, _ := grpc.NewServer(&grpcCfg, logger)
-		go grpcSrv.ListenAndServe()
+		grpcServer = grpcSrv.ListenAndServe()
 	}
 
 	// load HTTP server config
@@ -156,8 +157,12 @@ func main() {
 
 	// start HTTP server
 	srv, _ := api.NewServer(&srvCfg, logger)
+	httpServer, httpsServer, healthy, ready := srv.ListenAndServe()
+
+	// graceful shutdown
 	stopCh := signals.SetupSignalHandler()
-	srv.ListenAndServe(stopCh)
+	sd, _ := signals.NewShutdown(srvCfg.ServerShutdownTimeout, logger)
+	sd.Graceful(stopCh, httpServer, httpsServer, grpcServer, healthy, ready)
 }
 
 func initZap(logLevel string) (*zap.Logger, error) {
